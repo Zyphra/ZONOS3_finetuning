@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import os
 import json
 import math
 import sys
@@ -54,6 +55,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--normalize", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-examples", type=int, default=0, help="0 encodes everything")
     parser.add_argument("--shard", default=None, help="INDEX/COUNT: encode every COUNT-th input starting at INDEX")
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=2000,
+        help="Write the examples so far to OUTPUT.partial.pt every N clips and resume from it on restart; 0 disables",
+    )
     parser.add_argument("--min-duration", type=float, default=0.5)
     parser.add_argument("--max-duration", type=float, default=120.0)
     parser.add_argument("--conditions", action=argparse.BooleanOptionalAction, default=True)
@@ -346,6 +353,7 @@ def make_normalizer(language: str, enabled: bool):
 
 
 def main() -> None:
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     args = parse_args()
     params = json.loads((args.base_model / "params.json").read_text(encoding="utf-8"))
     model = params.get("model", params)
@@ -437,6 +445,18 @@ def main() -> None:
             )
 
     examples = []
+    partial = args.output.with_name(args.output.name + ".partial.pt")
+    if args.checkpoint_every and partial.is_file():
+        examples = torch.load(partial, map_location="cpu", weights_only=False)["examples"]
+        done_sources = {e["source"] for e in examples}
+        print(f"resuming from {partial}: {len(examples)} examples", flush=True)
+        rows = [row for row in rows if row["name"] not in done_sources]
+
+    def write_partial():
+        tmp = partial.with_suffix(".tmp")
+        torch.save({"examples": examples, "metadata": {"partial": True}}, tmp)
+        tmp.replace(partial)
+
     with torch.inference_mode():
         for clip, codes in codec.encode_stream(clips()):
             if clip.error is not None or codes is None:
@@ -466,7 +486,16 @@ def main() -> None:
                 }
             )
             if len(examples) % 200 == 0:
-                print(f"encoded {len(examples)}/{clip.index} (skipped {stats['skipped']})", flush=True)
+                allocated = torch.cuda.memory_allocated() / 2**30
+                reserved = torch.cuda.memory_reserved() / 2**30
+                print(
+                    f"encoded {len(examples)}/{clip.index} (skipped {stats['skipped']}) "
+                    f"gpu allocated {allocated:.1f} GiB reserved {reserved:.1f} GiB",
+                    flush=True,
+                )
+                torch.cuda.empty_cache()
+            if args.checkpoint_every and len(examples) % args.checkpoint_every == 0:
+                write_partial()
     skipped = stats["skipped"]
     print(f"encoded {len(examples)}/{len(rows)} (skipped {skipped})", flush=True)
 
@@ -494,6 +523,8 @@ def main() -> None:
     )
     hours = sum(e["duration"] for e in examples) / 3600
     print(f"wrote {len(examples)} examples ({hours:.2f} h, {len(speakers)} speakers) to {args.output}")
+    if partial.is_file():
+        partial.unlink()
 
 
 if __name__ == "__main__":

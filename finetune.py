@@ -586,7 +586,9 @@ def main() -> None:
             "A CUDA or ROCm GPU is required. Install the matching environment with "
             "`bash setup.sh nvidia` or `bash setup.sh amd`."
         )
-    dist.init_process_group("nccl")
+    from datetime import timedelta
+
+    dist.init_process_group("nccl", timeout=timedelta(minutes=float(os.environ.get("ZONOS3_DIST_TIMEOUT_MIN", "30"))))
     rank = dist.get_rank()
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = dist.get_world_size()
