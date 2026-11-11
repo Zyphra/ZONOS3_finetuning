@@ -100,7 +100,7 @@ tokenizer. Write transcripts in the form you will send at inference (spelled-out
 
 ### A new language
 
-For a language the release does not speak (Farsi, say), use a full fine-tune with 20+ hours of multi-speaker data and
+For a language that are not fully supported by the base model (Farsi, say), use a full fine-tune with 20+ hours of multi-speaker data and
 `configs/full-new-language.toml`. The text normalizer has no grammar for such a language, so preprocess with
 `--no-normalize` and serve with text normalization disabled (`ZONOS3_TTS_NORM=0` for the Python servers, or
 `"text_normalization": false` per request) and any server language code: the code only selects the normalizer and
