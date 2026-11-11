@@ -14,11 +14,13 @@ Training uses BF16 FSDP2, PyTorch causal SDPA for the two global-attention layer
 gated-DeltaNet layers (the kernels the model was trained with) and a plain PyTorch expert loop for the MoE. The same
 code runs on NVIDIA CUDA and AMD ROCm (both ship Triton).
 
-Minimum GPU memory:
+GPU memory (measured on one H100 with four 3-10 s clips per step): LoRA 2.7 GiB, full fine-tuning 5.1 GiB with the
+CPU-offloaded Muon momentum. A **24 GB GPU** runs both; longer packed batches (`--max-seq-len`, `--batch-size`) scale
+the activations.
 
-- LoRA: **1x24 GB GPU**, using a per-device batch size of 1.
-- Full fine-tuning: **1x24 GB GPU** for the 1.8 GB model with CPU-offloaded Muon momentum; 48 GB gives room for
-  long packed batches.
+On NVIDIA Hopper GPUs (H100/H200) FLA's Triton backward of the gated delta rule is broken with Triton 3.4-3.7.0, so
+`setup.sh nvidia` also installs TileLang (the `hopper` extra); its kernels compile with `nvcc`, so `CUDA_HOME` must
+point at a CUDA 12.8 toolkit. Ampere and ROCm GPUs use the Triton kernels.
 
 A fine-tuned checkpoint is written in the public format (`model.pth`, `params.json`, `tokenizer/`) and serves with
 every ZONOS3-Mini runtime: the CUDA server, the MLX and ggml servers after GGUF conversion, and the plain-PyTorch
@@ -138,7 +140,8 @@ torchrun --standalone --nproc-per-node=1 \
 | `configs/full-new-language.toml` | full-model Muon, longer schedule, release conditioning mix | a new language |
 
 LoRA recipes write an adapter checkpoint and periodic adapter snapshots. `metrics.jsonl` is written beside the
-checkpoint. The full recipes write a public-inference `model.pth` directly.
+checkpoint. The full recipes write a public-inference `model.pth` directly. `--data` takes several processed files
+(the shards of `preprocess.py --shard INDEX/COUNT`).
 
 Full fine-tuning on one GPU keeps Muon's momentum in CPU memory and streams one matrix at a time through the GPU;
 on multiple GPUs the full recipe uses Dion's distributed Muon path without CPU offload.
@@ -195,9 +198,13 @@ repo.
 
 ```bash
 pytest tests/test_layout.py tests/test_model_tiny.py          # CPU, seconds
-ZONOS3_BASE_MODEL=artifacts/base_model pytest tests/test_release_checkpoint.py   # strict load of the release weights,
-                                                               # logits parity with the zonos3 reference when installed
+pytest tests/test_gdn_backends.py tests/test_gdn_backward.py  # CUDA: FLA kernels against the plain recurrence
+ZONOS3_BASE_MODEL=artifacts/base_model pytest tests/test_release_checkpoint.py   # strict load of the release weights and
+                                                               # logits parity with the zonos3 reference (--preprocess)
+bash tests/gpu_smoke.sh 0                                      # everything plus short LoRA / full runs on synthetic data
 ```
+
+The parity test reproduces the reference's float32 logits exactly (max difference 0.0 on the release weights).
 
 ## Layout
 

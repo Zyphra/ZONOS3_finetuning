@@ -52,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--language", default="en_us", help="Text normalization language (server code)")
     parser.add_argument("--normalize", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-examples", type=int, default=0, help="0 encodes everything")
+    parser.add_argument("--shard", default=None, help="INDEX/COUNT: encode every COUNT-th input starting at INDEX")
     parser.add_argument("--min-duration", type=float, default=0.5)
     parser.add_argument("--max-duration", type=float, default=120.0)
     parser.add_argument("--conditions", action=argparse.BooleanOptionalAction, default=True)
@@ -283,6 +284,12 @@ def main() -> None:
         rows = rows_from_audio_dir(args)
     if args.max_examples:
         rows = rows[: args.max_examples]
+    if args.shard:
+        index, count = (int(v) for v in args.shard.split("/"))
+        if not 0 <= index < count:
+            raise SystemExit("--shard must be INDEX/COUNT with 0 <= INDEX < COUNT")
+        rows = rows[index::count]
+        print(f"shard {index}/{count}: {len(rows)} inputs", flush=True)
     if not rows:
         raise RuntimeError("no input examples")
 

@@ -192,13 +192,17 @@ def encode_example(
 class EncodedDataset(Dataset):
     """Pre-encoded examples (``preprocess.py``), grouped by speaker for the other-clip draws."""
 
-    def __init__(self, path: str | Path, *, config: TokenConfig, max_seq_len: int | None = None, tokenizer=None):
-        payload = torch.load(path, map_location="cpu", weights_only=False)
-        self.metadata = payload.get("metadata", {})
+    def __init__(self, path, *, config: TokenConfig, max_seq_len: int | None = None, tokenizer=None):
+        paths = [path] if isinstance(path, (str, Path)) else list(path)
+        raw_examples, self.metadata = [], {}
+        for one in paths:
+            payload = torch.load(one, map_location="cpu", weights_only=False)
+            self.metadata = payload.get("metadata", {}) or self.metadata
+            raw_examples.extend(payload["examples"])
         self.config = config
         examples = []
         self.context_dropped_count = 0
-        for index, example in enumerate(payload["examples"]):
+        for index, example in enumerate(raw_examples):
             example = dict(example)
             example.setdefault("segment_id", index)
             if "text_ids" not in example:

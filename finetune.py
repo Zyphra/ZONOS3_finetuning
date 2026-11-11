@@ -39,7 +39,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fine-tune ZONOS3-Mini with a TOML recipe and optional CLI overrides.")
     parser.add_argument("--config", type=Path, help="TOML training recipe")
     parser.add_argument("--base-model", type=Path, default=Path("artifacts/base_model"))
-    parser.add_argument("--data", type=Path, default=Path("data/processed/train.pt"))
+    parser.add_argument("--data", type=Path, nargs="+", default=[Path("data/processed/train.pt")], help="Processed .pt file(s)")
     parser.add_argument("--output", type=Path, default=Path("outputs/run/checkpoint"))
     parser.add_argument("--steps", type=int, default=100_000)
     parser.add_argument("--batch-size", type=int, default=4, help="Examples per GPU per micro-batch")
@@ -110,9 +110,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         unknown_keys = sorted(set(defaults) - valid_keys)
         if unknown_keys:
             parser.error(f"{config_args.config} contains unknown options: {', '.join(unknown_keys)}")
-        for key in ("base_model", "data", "output"):
+        for key in ("base_model", "output"):
             if key in defaults:
                 defaults[key] = Path(defaults[key])
+        if "data" in defaults:
+            value = defaults["data"]
+            defaults["data"] = [Path(v) for v in (value if isinstance(value, list) else [value])]
         parser.set_defaults(**defaults)
 
     args = parser.parse_args(argv)
@@ -575,9 +578,11 @@ def main() -> None:
     model = apply_fsdp(model, mesh)
     load_release_weights(model, args.base_model / "model.pth", rank, allow_missing_lora=lora_config is not None)
     model.set_quantile_balancing(bool(args.qb_update))
+    # Dion's Muon compiles its update per parameter shape (fullgraph): the default recompile limit of 8 is too small
+    # for the 77 Muon matrices even without --compile.
+    torch._dynamo.config.cache_size_limit = 128
+    torch._dynamo.config.capture_scalar_outputs = True
     if args.compile:
-        torch._dynamo.config.cache_size_limit = 64
-        torch._dynamo.config.capture_scalar_outputs = True
         model.forward = torch.compile(model.forward, backend="inductor", dynamic=True)
         if rank == 0:
             print("torch.compile enabled; GDN=FLA kernels; attention=PyTorch SDPA; MoE=PyTorch expert loop", flush=True)
@@ -661,6 +666,14 @@ def main() -> None:
             total_loss += lm_loss.detach().float() / args.grad_accum
             total_tokens += float((batch["target"] != -100).any(dim=-1).sum())
 
+        if rank == 0 and os.environ.get("ZONOS3_GRAD_DEBUG"):
+            norms = []
+            for name, parameter in model.named_parameters():
+                if parameter.grad is not None:
+                    grad = parameter.grad.full_tensor() if isinstance(parameter.grad, DTensor) else parameter.grad
+                    norms.append((float(grad.float().norm()), name))
+            norms.sort(reverse=True)
+            print("grad norms: " + "  ".join(f"{name}={value:.1f}" for value, name in norms[:8]), flush=True)
         grad_norm = torch.nn.utils.clip_grad_norm_(
             [parameter for parameter in model.parameters() if parameter.requires_grad], args.grad_clip, foreach=True
         )
