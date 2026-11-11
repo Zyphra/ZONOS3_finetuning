@@ -90,7 +90,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--val-fraction", type=float, default=None, help="Defaults to 0.1 for LoRA and 0 for full.")
     parser.add_argument("--eval-every", type=int, default=25)
     parser.add_argument("--eval-batches", type=int, default=0, help="Maximum validation batches per pass; 0 = all.")
-    parser.add_argument("--save-every", type=int, default=0, help="Adapter snapshots every N steps; 0 disables.")
+    parser.add_argument(
+        "--save-every",
+        type=int,
+        default=0,
+        help="Every N steps: adapter snapshots (LoRA) or a resumable training state (full fine-tunes); 0 disables.",
+    )
+    parser.add_argument("--keep-checkpoints", type=int, default=2, help="Resumable training states to keep")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Continue a full fine-tune from the latest training state under the output's run directory.",
+    )
     parser.add_argument(
         "--compile",
         action=argparse.BooleanOptionalAction,
@@ -460,6 +471,53 @@ def save_adapter_snapshot(model: Zonos3LM, output: Path, step: int, rank: int) -
     dist.barrier()
 
 
+def _torch_optimizers(optimizer) -> list[torch.optim.Optimizer]:
+    if isinstance(optimizer, ChainedOptimizer):
+        return list(optimizer.optimizers)
+    if isinstance(optimizer, torch.optim.Optimizer):
+        return [optimizer]
+    return []  # LoraMuon keeps its own momentum; its runs are not resumable
+
+
+def latest_train_state(run_output: Path) -> Path | None:
+    root = run_output / "train_state"
+    if not root.is_dir():
+        return None
+    states = sorted(p for p in root.iterdir() if p.is_dir() and (p / "meta.json").is_file())
+    return states[-1] if states else None
+
+
+def save_train_state(model, optimizer, run_output: Path, step: int, epoch: int, consumed: int, args, rank: int) -> None:
+    """Model + optimizer state (torch.distributed.checkpoint) and the loader position, for --resume."""
+    import torch.distributed.checkpoint as dcp
+    from torch.distributed.checkpoint.state_dict import get_state_dict
+
+    optimizers = _torch_optimizers(optimizer)
+    path = run_output / "train_state" / f"step-{step:07d}"
+    model_state, optim_state = get_state_dict(model, optimizers)
+    dcp.save({"model": model_state, "optim": optim_state}, checkpoint_id=str(path))
+    if rank == 0:
+        meta = {"step": step, "epoch": epoch, "consumed": consumed, "args": vars(args)}
+        (path / "meta.json").write_text(json.dumps(meta, indent=2, default=str) + "\n", encoding="utf-8")
+        states = sorted(p for p in path.parent.iterdir() if p.is_dir() and (p / "meta.json").is_file())
+        for old in states[: -max(1, args.keep_checkpoints)]:
+            shutil.rmtree(old, ignore_errors=True)
+        print(f"saved training state at step {step} to {path}", flush=True)
+    dist.barrier()
+
+
+def load_train_state(model, optimizer, path: Path) -> dict:
+    import torch.distributed.checkpoint as dcp
+    from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
+
+    optimizers = _torch_optimizers(optimizer)
+    model_state, optim_state = get_state_dict(model, optimizers)
+    state = {"model": model_state, "optim": optim_state}
+    dcp.load(state, checkpoint_id=str(path))
+    set_state_dict(model, optimizers, model_state_dict=state["model"], optim_state_dict=state["optim"])
+    return json.loads((path / "meta.json").read_text(encoding="utf-8"))
+
+
 def split_dataset(dataset: EncodedDataset, val_fraction: float, seed: int) -> tuple[Subset, Subset | None]:
     indices = list(range(len(dataset)))
     random.Random(seed).shuffle(indices)
@@ -636,27 +694,47 @@ def main() -> None:
     optimizer.zero_grad(set_to_none=True)
     model.train()
     run_output = args.output.parent
+    resumable = args.finetune_method == "full" or isinstance(optimizer, torch.optim.Optimizer)
+    start_step, epoch, consumed = 0, 0, 0
+    state_path = latest_train_state(run_output) if args.resume else None
+    if args.resume and state_path is None and rank == 0:
+        print("no training state to resume from; starting from the release weights", flush=True)
+    if state_path is not None:
+        if not resumable:
+            raise RuntimeError("--resume needs a torch optimizer (full fine-tunes, LoRA with AdamW)")
+        meta = load_train_state(model, optimizer, state_path)
+        start_step, epoch, consumed = int(meta["step"]), int(meta["epoch"]), int(meta["consumed"])
+        if rank == 0:
+            print(f"resumed from {state_path}: step {start_step}, epoch {epoch}, {consumed} batches into it", flush=True)
     if rank == 0:
         run_output.mkdir(parents=True, exist_ok=True)
-        (run_output / "metrics.jsonl").write_text("", encoding="utf-8")
+        if state_path is None:
+            (run_output / "metrics.jsonl").write_text("", encoding="utf-8")
 
     last_val_loss = None
-    if val_loader is not None:
+    if val_loader is not None and state_path is None:
         last_val_loss = evaluate(model, val_loader, args.eval_batches, device)
         if rank == 0:
             print(f"validation step=0 loss={last_val_loss:.4f}", flush=True)
             write_metric(run_output, {"step": 0, "validation_loss": last_val_loss})
 
-    epoch = 0
+    sampler.set_epoch(epoch)
     iterator = iter(loader)
-    for step in range(args.steps):
+    for _ in range(consumed):  # replay the loader position of a resumed epoch (collation only)
+        try:
+            next(iterator)
+        except StopIteration:
+            break
+    for step in range(start_step, args.steps):
         total_loss = torch.zeros((), device=device, dtype=torch.float32)
         total_tokens = torch.zeros((), device=device, dtype=torch.float32)
         for _ in range(args.grad_accum):
             try:
                 batch = next(iterator)
+                consumed += 1
             except StopIteration:
                 epoch += 1
+                consumed = 1
                 sampler.set_epoch(epoch)
                 iterator = iter(loader)
                 batch = next(iterator)
@@ -715,8 +793,11 @@ def main() -> None:
             if should_evaluate:
                 metric["validation_loss"] = last_val_loss
             write_metric(run_output, metric)
-        if lora_config is not None and args.save_every > 0 and step_number % args.save_every == 0 and step_number < args.steps:
-            save_adapter_snapshot(model, args.output, step_number, rank)
+        if args.save_every > 0 and step_number % args.save_every == 0 and step_number < args.steps:
+            if lora_config is not None:
+                save_adapter_snapshot(model, args.output, step_number, rank)
+            if resumable and lora_config is None:
+                save_train_state(model, optimizer, run_output, step_number, epoch, consumed, args, rank)
 
     save_for_public_inference(
         model, params, args.output, args, rank, lora_config=lora_config, targeted_modules=targeted_modules

@@ -65,6 +65,13 @@ def parse_args() -> argparse.Namespace:
         help="Clips (20 s lanes) the codec encoder batches per GPU pass; the training data was encoded with 4. "
         "Lanes are independent, but bf16 kernels differ by batch shape, so near-tie codes move with the batch size.",
     )
+    parser.add_argument(
+        "--codec-chunk-seconds",
+        type=float,
+        default=20.0,
+        help="Lane length of the codec batcher (the training data used 20 s); shorter lanes waste less GPU time on "
+        "short clips, longer clips are split with 10 s of context",
+    )
     args = parser.parse_args()
     if sum(x is not None for x in (args.dataset, args.manifest, args.audio_dir)) != 1:
         parser.error("Give exactly one of --dataset, --manifest, --audio-dir")
@@ -264,9 +271,10 @@ class Clip:
     mono: np.ndarray | None = None
     native_rate: int = 0
     duration: float = 0.0
+    measurements: dict | None = None
 
 
-def build_encoder(device: str, batch_size: int):
+def build_encoder(device: str, batch_size: int, chunk_seconds: float = 20.0):
     """The release dual codec's encoder (``zonos3.codec.codec_adapter.MossAutoencoder``) batching ``batch_size``
     20-second lanes per GPU pass; lanes are independent, so the codes equal the one-clip-at-a-time encoding."""
     from types import SimpleNamespace
@@ -293,8 +301,8 @@ def build_encoder(device: str, batch_size: int):
     return MossAutoencoder(
         SimpleNamespace(
             hybrid_batch_size=int(batch_size),
-            hybrid_chunk_seconds=20.0,
-            hybrid_context_seconds=10.0,
+            hybrid_chunk_seconds=float(chunk_seconds),
+            hybrid_context_seconds=min(10.0, float(chunk_seconds) / 2),
             hybrid_cuda_graph=True,
         ),
         generator_path=release.resolve_file(entry["checkpoint"]),
@@ -368,7 +376,7 @@ def main() -> None:
 
     device = args.device
     print(f"preprocessing on {torch.cuda.get_device_name(torch.device(device))}", flush=True)
-    codec = build_encoder(device, args.codec_batch_size)
+    codec = build_encoder(device, args.codec_batch_size, args.codec_chunk_seconds)
     entry = registry_entry(model["speaker_embedding_codec"])
     if entry is None:
         raise RuntimeError(f"no speaker encoder registered for {model['speaker_embedding_codec']!r}")
@@ -406,6 +414,13 @@ def main() -> None:
             peak = float(audio.abs().amax())
             if peak > 1.0:
                 audio = audio / peak
+            measurements = None
+            if args.conditions:
+                measurements = {
+                    "loudness": integrated_loudness(mono, sample_rate),
+                    "fmax": bandwidth_60db(mono, sample_rate),
+                    "speaking_rate": len(text_norm.encode("utf-8")) / duration,
+                }
             yield Clip(
                 audio=audio.numpy(),
                 sample_rate=CODEC_RATE,
@@ -418,6 +433,7 @@ def main() -> None:
                 mono=mono,
                 native_rate=sample_rate,
                 duration=duration,
+                measurements=measurements,
             )
 
     examples = []
@@ -432,15 +448,8 @@ def main() -> None:
             if codes.shape != (frames, 10):
                 raise RuntimeError(f"codec returned {codes.shape}, expected {(frames, 10)} for {clip.name}")
             embedding = speaker_encoder(torch.from_numpy(clip.mono), clip.native_rate).reshape(-1).cpu().float()
-            measurements = None
-            conditions = None
-            if args.conditions:
-                measurements = {
-                    "loudness": integrated_loudness(clip.mono, clip.native_rate),
-                    "fmax": bandwidth_60db(clip.mono, clip.native_rate),
-                    "speaking_rate": len(clip.text_norm.encode("utf-8")) / clip.duration,
-                }
-                conditions = condition_buckets(measurements, params)
+            measurements = clip.measurements
+            conditions = condition_buckets(measurements, params) if measurements is not None else None
             examples.append(
                 {
                     "codes": torch.from_numpy(codes.astype(np.int16)).contiguous(),
