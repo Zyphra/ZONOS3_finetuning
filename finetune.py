@@ -746,6 +746,11 @@ def main() -> None:
             total_loss += lm_loss.detach().float() / args.grad_accum
             total_tokens += float((batch["target"] != -100).any(dim=-1).sum())
 
+        # A parameter a micro-batch never touched (the speaker projection when no draw had an embedding row) has no
+        # gradient on that rank; the distributed optimizer needs the same parameter set on every rank, so give it zeros.
+        for parameter in model.parameters():
+            if parameter.requires_grad and parameter.grad is None:
+                parameter.grad = torch.zeros_like(parameter)
         if rank == 0 and os.environ.get("ZONOS3_GRAD_DEBUG"):
             norms = []
             for name, parameter in model.named_parameters():
