@@ -27,6 +27,7 @@ import json
 import math
 import sys
 from io import BytesIO
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -57,6 +58,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-duration", type=float, default=120.0)
     parser.add_argument("--conditions", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--codec-batch-size",
+        type=int,
+        default=4,
+        help="Clips (20 s lanes) the codec encoder batches per GPU pass; the training data was encoded with 4. "
+        "Lanes are independent, but bf16 kernels differ by batch shape, so near-tie codes move with the batch size.",
+    )
     args = parser.parse_args()
     if sum(x is not None for x in (args.dataset, args.manifest, args.audio_dir)) != 1:
         parser.error("Give exactly one of --dataset, --manifest, --audio-dir")
@@ -239,6 +247,66 @@ def condition_buckets(measurements: dict[str, float], params: dict) -> list[int]
 # ------------------------------------------------------------------------------------------------- encoders
 
 
+@dataclass
+class Clip:
+    """One input of the codec's streaming batcher (``audio`` / ``sample_rate`` / ``error`` are its contract) with the
+    fields the example needs afterwards."""
+
+    audio: np.ndarray
+    sample_rate: int
+    error: str | None = None
+    index: int = 0
+    name: str = ""
+    text: str = ""
+    text_norm: str = ""
+    text_ids: list = field(default_factory=list)
+    speaker: str = ""
+    mono: np.ndarray | None = None
+    native_rate: int = 0
+    duration: float = 0.0
+
+
+def build_encoder(device: str, batch_size: int):
+    """The release dual codec's encoder (``zonos3.codec.codec_adapter.MossAutoencoder``) batching ``batch_size``
+    20-second lanes per GPU pass; lanes are independent, so the codes equal the one-clip-at-a-time encoding."""
+    from types import SimpleNamespace
+
+    from zonos3.tokenizer import matched_codec
+    from zonos3.utils import release
+
+    saved = sys.modules.get("kernels")  # the codec's Transformers teacher must not pick up the pinned kernels module
+    sys.modules["kernels"] = None  # type: ignore[assignment]
+    try:
+        from transformers import Wav2Vec2BertModel  # noqa: F401
+    finally:
+        if saved is None:
+            sys.modules.pop("kernels", None)
+        else:
+            sys.modules["kernels"] = saved
+    from zonos3.codec.codec_adapter import MossAutoencoder
+
+    entries = [e for e in matched_codec.registry().values() if e.get("family") == "dual"]
+    if len(entries) != 1:
+        raise RuntimeError("expected exactly one dual-family codec in the registry")
+    entry = entries[0]
+    torch.cuda.set_device(torch.device(device).index or 0)
+    return MossAutoencoder(
+        SimpleNamespace(
+            hybrid_batch_size=int(batch_size),
+            hybrid_chunk_seconds=20.0,
+            hybrid_context_seconds=10.0,
+            hybrid_cuda_graph=True,
+        ),
+        generator_path=release.resolve_file(entry["checkpoint"]),
+        teacher_dir=release.resolve_dir_or_local(entry["teacher"]),
+        step=int(entry["codec_step"]),
+        codebook_sizes=entry["codebook_sizes"],
+        name=entry["codec"],
+        checkpoint_sha256=entry["checkpoint_sha256"],
+        device=device,
+    )
+
+
 def load_tokenizer(base_model: Path, params: dict):
     import hashlib
 
@@ -297,82 +365,101 @@ def main() -> None:
         raise RuntimeError("A CUDA GPU is required: the codec encoder runs on the GPU (bash setup.sh nvidia --preprocess)")
     import torchaudio.functional as AF
     from zonos3.models.mect_speaker import MECTFbankSpeakerEmbedding, registry_entry
-    from zonos3.tokenizer.dual_reference import get_encoder
 
     device = args.device
     print(f"preprocessing on {torch.cuda.get_device_name(torch.device(device))}", flush=True)
-    codec = get_encoder(device)
+    codec = build_encoder(device, args.codec_batch_size)
     entry = registry_entry(model["speaker_embedding_codec"])
     if entry is None:
         raise RuntimeError(f"no speaker encoder registered for {model['speaker_embedding_codec']!r}")
     speaker_encoder = MECTFbankSpeakerEmbedding(entry, device=device)
     frame_hop = 2940
+    stats = {"skipped": 0}
 
-    examples, skipped = [], 0
-    with torch.inference_mode():
+    def clips():
+        """Decoded, resampled clips for the codec's streaming batcher (it reads them from its own thread)."""
         for index, row in enumerate(rows, start=1):
             text = row.get("text")
             if not isinstance(text, str) or not text.strip():
-                skipped += 1
+                stats["skipped"] += 1
                 continue
             try:
                 wav, sample_rate = row["load"]()
             except Exception as exc:
                 print(f"skipping {row['name']}: {exc}", file=sys.stderr)
-                skipped += 1
+                stats["skipped"] += 1
                 continue
             mono = wav.mean(axis=0).astype(np.float32)
             duration = mono.shape[0] / sample_rate
             if duration < args.min_duration or duration > args.max_duration:
-                skipped += 1
+                stats["skipped"] += 1
                 continue
             text_norm = normalize(text.strip())
             text_ids = [t + offset for t in tokenizer.encode(text_norm, add_special_tokens=False).ids]
             if not text_ids:
-                skipped += 1
+                stats["skipped"] += 1
                 continue
-
-            # codec codes: mono at 44.1 kHz, peak-normalized only above 1.0, whole frames
+            # codec input: mono at 44.1 kHz, peak-normalized only above 1.0
             audio = torch.from_numpy(mono)[None]
             if sample_rate != CODEC_RATE:
                 audio = AF.resample(audio, sample_rate, CODEC_RATE)
             peak = float(audio.abs().amax())
             if peak > 1.0:
                 audio = audio / peak
-            frames = math.ceil(audio.shape[-1] / frame_hop)
-            codes = np.asarray(codec.encode(audio.numpy(), CODEC_RATE))
+            yield Clip(
+                audio=audio.numpy(),
+                sample_rate=CODEC_RATE,
+                index=index,
+                name=row["name"],
+                text=text.strip(),
+                text_norm=text_norm,
+                text_ids=text_ids,
+                speaker=str(row.get("speaker") or "speaker"),
+                mono=mono,
+                native_rate=sample_rate,
+                duration=duration,
+            )
+
+    examples = []
+    with torch.inference_mode():
+        for clip, codes in codec.encode_stream(clips()):
+            if clip.error is not None or codes is None:
+                print(f"skipping {clip.name}: {clip.error}", file=sys.stderr)
+                stats["skipped"] += 1
+                continue
+            codes = np.asarray(codes)
+            frames = math.ceil(clip.audio.shape[-1] / frame_hop)
             if codes.shape != (frames, 10):
-                raise RuntimeError(f"codec returned {codes.shape}, expected {(frames, 10)} for {row['name']}")
-
-            embedding = speaker_encoder(torch.from_numpy(mono), sample_rate).reshape(-1).cpu().float()
-
+                raise RuntimeError(f"codec returned {codes.shape}, expected {(frames, 10)} for {clip.name}")
+            embedding = speaker_encoder(torch.from_numpy(clip.mono), clip.native_rate).reshape(-1).cpu().float()
             measurements = None
             conditions = None
             if args.conditions:
                 measurements = {
-                    "loudness": integrated_loudness(mono, sample_rate),
-                    "fmax": bandwidth_60db(mono, sample_rate),
-                    "speaking_rate": len(text_norm.encode("utf-8")) / duration,
+                    "loudness": integrated_loudness(clip.mono, clip.native_rate),
+                    "fmax": bandwidth_60db(clip.mono, clip.native_rate),
+                    "speaking_rate": len(clip.text_norm.encode("utf-8")) / clip.duration,
                 }
                 conditions = condition_buckets(measurements, params)
-
             examples.append(
                 {
                     "codes": torch.from_numpy(codes.astype(np.int16)).contiguous(),
-                    "text": text_norm,
-                    "text_raw": text.strip(),
-                    "text_ids": text_ids,
-                    "speaker": str(row.get("speaker") or "speaker"),
+                    "text": clip.text_norm,
+                    "text_raw": clip.text,
+                    "text_ids": clip.text_ids,
+                    "speaker": clip.speaker,
                     "speaker_embedding": embedding,
                     "conditions": conditions,
                     "measurements": measurements,
-                    "duration": duration,
+                    "duration": clip.duration,
                     "segment_id": len(examples),
-                    "source": row["name"],
+                    "source": clip.name,
                 }
             )
-            if index % 16 == 0 or index == len(rows):
-                print(f"encoded {len(examples)}/{index} (skipped {skipped})", flush=True)
+            if len(examples) % 200 == 0:
+                print(f"encoded {len(examples)}/{clip.index} (skipped {stats['skipped']})", flush=True)
+    skipped = stats["skipped"]
+    print(f"encoded {len(examples)}/{len(rows)} (skipped {skipped})", flush=True)
 
     if not examples:
         raise RuntimeError("no usable examples")
