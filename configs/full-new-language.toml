@@ -1,0 +1,16 @@
+# Full-model recipe for a large distribution shift (a new language, 20+ hours of multi-speaker data).
+# Longer schedule, a higher learning-rate scale and the release conditioning mix; validate the languages you keep.
+finetune_method = "full"
+steps = 3000
+batch_size = 4
+grad_accum = 4
+warmup_steps = 100
+lr_scale = 0.1
+p_embedding = 0.45
+p_reference = 0.45
+condition_dropout = 0.2
+val_fraction = 0.02
+eval_every = 100
+qb_update = true
+compile = true
+export_merged = true

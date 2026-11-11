@@ -1,0 +1,52 @@
+[project]
+name = "zonos3-mini-finetuning"
+version = "0.1.0"
+description = "Minimal PyTorch fine-tuning for the public ZONOS3-Mini checkpoint"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "dion @ git+https://github.com/microsoft/dion.git@dd6c02f5173dc43cc7a0974535d7011a74bda494",
+    "fla-core==0.5.2",
+    "huggingface-hub>=0.36",
+    "numpy<2.5",
+    "pyarrow>=21",
+    "scipy>=1.14",
+    "soundfile>=0.13",
+    "tokenizers>=0.21",
+    "torch==2.9.1",
+    "torchaudio==2.9.1",
+]
+
+[project.optional-dependencies]
+# NVIDIA Hopper (H100/H200): FLA's Triton backward of the gated delta rule is broken with Triton 3.4-3.7.0 (fla-org
+# issue 640); FLA switches to its TileLang kernels when tilelang is installed and nvcc is on the PATH (CUDA_HOME).
+hopper = [
+    "tilelang==0.1.14",
+]
+# The codec encoder, the speaker encoder and the text normalizer of the ZONOS3-Mini repo (preprocess.py, the reference
+# runtime of infer.py --backend reference).
+preprocess = [
+    "zonos3 @ git+https://github.com/Zyphra/ZONOS3-Mini.git#subdirectory=model",
+]
+# The CUDA offline inference API (infer.py --backend sgl); NVIDIA only.
+inference-nvidia = [
+    "zonos3 @ git+https://github.com/Zyphra/ZONOS3-Mini.git#subdirectory=model",
+    "zonos3-sgl @ git+https://github.com/Zyphra/ZONOS3-Mini.git#subdirectory=servers/sgl",
+    "flashinfer-jit-cache @ https://github.com/flashinfer-ai/flashinfer/releases/download/v0.5.3/flashinfer_jit_cache-0.5.3+cu128-cp39-abi3-manylinux_2_28_x86_64.whl",
+]
+
+[dependency-groups]
+dev = ["ruff>=0.12", "pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

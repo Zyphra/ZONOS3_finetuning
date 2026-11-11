@@ -1,0 +1,20 @@
+# Attention LoRA with low-rank-manifold Muon.
+finetune_method = "lora"
+lora_optimizer = "lora-muon-manifold"
+lora_targets = "attention"
+lora_rank = 16
+lora_alpha = 8.0
+lora_dropout = 0.0
+lora_lr = 0.003
+lora_weight_decay = 0.0
+steps = 180
+batch_size = 4
+grad_accum = 1
+warmup_steps = 10
+val_fraction = 0.1
+eval_every = 60
+save_every = 60
+seed = 333
+split_seed = 333
+compile = true
+export_merged = false

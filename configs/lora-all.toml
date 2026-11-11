@@ -1,0 +1,22 @@
+# Wider LoRA (attention, GDN, FFN, experts and the output head) for style or accent shifts that attention-only
+# adapters do not learn; AdamW + LoRA+.
+finetune_method = "lora"
+lora_optimizer = "adamw"
+lora_targets = "all"
+lora_rank = 16
+lora_alpha = 16.0
+lora_dropout = 0.0
+lora_lr = 0.0001
+lora_plus_ratio = 4.0
+lora_weight_decay = 0.0
+steps = 400
+batch_size = 4
+grad_accum = 1
+warmup_steps = 20
+val_fraction = 0.1
+eval_every = 50
+save_every = 100
+seed = 333
+split_seed = 333
+compile = true
+export_merged = false

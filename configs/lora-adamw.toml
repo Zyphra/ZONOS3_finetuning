@@ -1,0 +1,21 @@
+# Default single-voice recipe: rank-32 attention/output LoRA+ with AdamW.
+finetune_method = "lora"
+lora_optimizer = "adamw"
+lora_targets = "attention-output"
+lora_rank = 32
+lora_alpha = 16.0
+lora_dropout = 0.0
+lora_lr = 0.0001
+lora_plus_ratio = 4.0
+lora_weight_decay = 0.0
+steps = 180
+batch_size = 4
+grad_accum = 1
+warmup_steps = 10
+val_fraction = 0.1
+eval_every = 30
+save_every = 60
+seed = 333
+split_seed = 333
+compile = true
+export_merged = false
