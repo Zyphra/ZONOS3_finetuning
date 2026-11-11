@@ -33,6 +33,7 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+import soxr
 import torch
 
 AUDIO_SUFFIXES = (".wav", ".flac", ".ogg", ".oga", ".opus", ".mp3", ".m4a")
@@ -379,7 +380,6 @@ def main() -> None:
 
     if not torch.cuda.is_available():
         raise RuntimeError("A CUDA GPU is required: the codec encoder runs on the GPU (bash setup.sh nvidia --preprocess)")
-    import torchaudio.functional as AF
     from zonos3.models.mect_speaker import MECTFbankSpeakerEmbedding, registry_entry
 
     device = args.device
@@ -415,10 +415,10 @@ def main() -> None:
             if not text_ids:
                 stats["skipped"] += 1
                 continue
-            # codec input: mono at 44.1 kHz, peak-normalized only above 1.0
-            audio = torch.from_numpy(mono)[None]
-            if sample_rate != CODEC_RATE:
-                audio = AF.resample(audio, sample_rate, CODEC_RATE)
+            # codec input: mono at 44.1 kHz (libsoxr: any input rate at the same cost, unlike the GCD-based torchaudio
+            # resampler, which crawls on odd rates such as 22056 Hz), peak-normalized only above 1.0
+            audio44 = soxr.resample(mono, sample_rate, CODEC_RATE, quality="HQ") if sample_rate != CODEC_RATE else mono
+            audio = torch.from_numpy(np.ascontiguousarray(audio44, dtype=np.float32))[None]
             peak = float(audio.abs().amax())
             if peak > 1.0:
                 audio = audio / peak
@@ -467,7 +467,7 @@ def main() -> None:
             frames = math.ceil(clip.audio.shape[-1] / frame_hop)
             if codes.shape != (frames, 10):
                 raise RuntimeError(f"codec returned {codes.shape}, expected {(frames, 10)} for {clip.name}")
-            embedding = speaker_encoder(torch.from_numpy(clip.mono), clip.native_rate).reshape(-1).cpu().float()
+            embedding = speaker_encoder(torch.from_numpy(clip.audio[0]), clip.sample_rate).reshape(-1).cpu().float()
             measurements = clip.measurements
             conditions = condition_buckets(measurements, params) if measurements is not None else None
             examples.append(
