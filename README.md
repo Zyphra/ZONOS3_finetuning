@@ -55,6 +55,9 @@ speaker row less, and the loss shows up in every language. Rank-32 LoRA on 92 h 
 
 The other-clip embedding rows cost the similarity; the cross-clip reference prefixes cost intelligibility. Keep
 `--p-reference` at 0 unless the fine-tuned model must clone from raw reference audio, and then expect a trade-off.
+A full fine-tune with these defaults (`configs/full-new-language.toml`, `--lr-scale 0.05`, 1500 steps of 4 x 16 x 4
+clips) reached Urdu WER 5.0 / sim 74.8 and English 2.2 / 64.8 on the same lines, and on 300 unseen FLEURS-R Urdu
+voices WER 14.8 / sim 81.2 against the release's 16.9 / 80.2.
 
 The loss is the release loss: cross entropy over every codebook's codes plus the EOA token, codebook 0 (the semantic
 codebook) weighted 3x (`--semantic-loss-weight`). The MoE router balancing biases stay at their release values: the
