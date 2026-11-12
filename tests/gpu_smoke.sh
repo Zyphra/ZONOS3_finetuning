@@ -23,10 +23,10 @@ torchrun --standalone --nproc-per-node=1 finetune.py --config configs/lora-adamw
 python merge_adapter.py --base-model artifacts/base_model --adapter outputs/smoke_lora/checkpoint --output outputs/smoke_lora/merged
 ZONOS3_BASE_MODEL=outputs/smoke_lora/merged python -m pytest tests/test_release_checkpoint.py -q -k strict_load
 
-echo "== full run (compiled, quantile balancing on)"
+echo "== full run (compiled, quantile balancing on for coverage)"
 torchrun --standalone --nproc-per-node=1 finetune.py --config configs/full.toml \
   --data data/processed/synthetic.pt --output outputs/smoke_full/checkpoint \
-  --steps 3 --batch-size 2 --grad-accum 2 --warmup-steps 1 --num-workers 2 --save-every 2
+  --steps 3 --batch-size 2 --grad-accum 2 --warmup-steps 1 --num-workers 2 --save-every 2 --qb-update
 ZONOS3_BASE_MODEL=outputs/smoke_full/checkpoint python -m pytest tests/test_release_checkpoint.py -q -k strict_load
 
 echo "== chained window: --resume on a complete run is a no-op"

@@ -42,8 +42,11 @@ The remaining draws are unconditioned. The release recipe used about 45 % embedd
 voices from an embedding and from a reference clip; a single-voice adapter can set `--p-reference 0`.
 
 The loss is the release loss: cross entropy over every codebook's codes plus the EOA token, codebook 0 (the semantic
-codebook) weighted 3x (`--semantic-loss-weight`). Full fine-tunes also run the release's quantile-balancing update of
-the MoE router biases after every step (`--qb-update`), which keeps the 64 experts evenly used while the router drifts.
+codebook) weighted 3x (`--semantic-loss-weight`). The MoE router balancing biases stay at their release values: the
+release trainer re-estimated them after every step (quantile balancing) over ~12 M tokens, and on a fine-tune's
+small, single-domain batches that per-step estimate drifts the biases far from the release routing (a 3000-step Urdu
+run doubled them and lost 6 WER points and most of its speaker similarity until the release biases were restored).
+`--qb-update` re-enables it, smoothed with `--qb-ema` (0.99).
 
 ## Install
 
@@ -155,7 +158,7 @@ Draw mix and data options (`python finetune.py --help` lists everything):
 | `--condition-dropout` | 0.2 | per condition row, replace the bucket by "unknown" |
 | `--reference-max-seconds` | 30 | longest reference prefix (the model accepts 60) |
 | `--max-seq-len` | 8192 | longest packed example in rows (about 9 minutes of audio) |
-| `--qb-update` | full only | quantile-balancing update of the router biases |
+| `--qb-update` / `--qb-ema` | off / 0.99 | per-step quantile-balancing update of the router biases (EMA-smoothed); off keeps the release routing |
 | `--save-every` / `--resume` | 0 / off | full fine-tunes: a resumable training state (model, optimizer, loader position) every N steps and at the last step under the run directory; `--resume` continues from the latest one, for preemptible or time-limited jobs. A chained job (`sbatch --dependency=afterany:<id>`) with `--resume` exits at once when the run is already complete |
 | `--gdn-backend` | auto | `fla` (Triton kernels) or the slow `torch` recurrence (tests) |
 

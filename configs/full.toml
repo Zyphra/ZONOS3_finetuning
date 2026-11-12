@@ -6,6 +6,6 @@ grad_accum = 4
 warmup_steps = 50
 lr_scale = 0.05
 val_fraction = 0.0
-qb_update = true
+qb_update = false
 compile = true
 export_merged = true

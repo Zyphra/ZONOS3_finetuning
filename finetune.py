@@ -83,9 +83,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--qb-update",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Quantile-balancing update of the MoE router biases after every step (default: full fine-tunes only).",
+        help="Quantile-balancing update of the MoE router biases after every step (default: off; see README).",
     )
-    parser.add_argument("--qb-ema", type=float, default=0.0)
+    parser.add_argument("--qb-ema", type=float, default=0.99, help="EMA of the router-bias update when --qb-update is on")
     parser.add_argument("--gdn-backend", choices=("auto", "fla", "torch"), default="auto")
     parser.add_argument("--val-fraction", type=float, default=None, help="Defaults to 0.1 for LoRA and 0 for full.")
     parser.add_argument("--eval-every", type=int, default=25)
@@ -135,7 +135,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.split_seed is None:
         args.split_seed = args.seed
     if args.qb_update is None:
-        args.qb_update = args.finetune_method == "full"
+        args.qb_update = False  # the release biases stay; per-step rebalancing on small batches drifts them (README)
     if not 0.0 <= args.val_fraction < 1.0:
         parser.error("--val-fraction must be in [0, 1)")
     if args.p_embedding + args.p_reference > 1.0 + 1e-9:
