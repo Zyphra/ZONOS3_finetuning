@@ -63,11 +63,13 @@ class TokenConfig:
 
 @dataclass(frozen=True)
 class DrawPolicy:
-    """How a training draw conditions the sequence (the fine-tuning mix of the release recipe)."""
+    """How a training draw conditions the sequence. Default: the clip's own embedding (90 %) or nothing (10 %); the
+    release mix (45 % reference prefix of another clip, 45 % embedding rows half of them from another clip) teaches a
+    fine-tune to follow the speaker row less (README, "Speaker conditioning draws")."""
 
-    p_embedding: float = 0.45  # reserved speaker row + MECT embedding
-    p_reference: float = 0.45  # raw reference prefix: another clip of the same speaker (the rest: unconditioned)
-    embedding_other_clip: float = 0.5  # the embedding of another clip of the same speaker, when one exists
+    p_embedding: float = 0.9  # reserved speaker row + MECT embedding
+    p_reference: float = 0.0  # raw reference prefix: another clip of the same speaker (the rest: unconditioned)
+    embedding_other_clip: float = 0.0  # the embedding of another clip of the same speaker, when one exists
     condition_dropout: float = 0.2  # per condition row -> the unknown bucket
     reference_min_seconds: float = 1.0
     reference_max_seconds: float = 30.0

@@ -37,9 +37,24 @@ ZONOS3-Mini conditions every utterance on three things the trainer reproduces fr
 | speaker row | one row the model replaces by the projected 192-d MECT speaker embedding | `--p-embedding` of the draws |
 | condition rows | loudness (LUFS), bandwidth (Hz) and speaking rate (UTF-8 bytes/s) bucket ids | measured in `preprocess.py`, dropped to "unknown" with `--condition-dropout` |
 
-The remaining draws are unconditioned. The release recipe used about 45 % embedding draws, 45 % reference draws and
-0.2 condition dropout, the defaults here. Keep both speaker paths in the mix if the fine-tuned model must still clone
-voices from an embedding and from a reference clip; a single-voice adapter can set `--p-reference 0`.
+The remaining draws are unconditioned. The defaults are 90 % embedding draws that carry the clip's **own** embedding,
+10 % unconditioned draws (for CFG) and 0.2 condition dropout.
+
+**Speaker conditioning draws.** The release recipe mixed 45 % reference-prefix draws and 45 % embedding draws, half of
+the embeddings taken from another clip of the same speaker. On a fine-tune that mix teaches the model to follow the
+speaker row less, and the loss shows up in every language. Rank-32 LoRA on 92 h of Urdu (six voices, 1500 steps of
+16 clips, 24 held-out lines with a same-voice reference, Whisper-v3 WER, ReDimNet similarity x100):
+
+| draws | Urdu WER | Urdu sim | English WER | English sim |
+|---|---|---|---|---|
+| release base (no fine-tune) | 8.8 | 73.0 | 1.5 | 68.4 |
+| release mix (0.45 / 0.45 / other clip 0.5) | 9.1 | 69.8 | 1.5 | 54.7 |
+| no reference prefix, other clip kept | 8.2 | 70.3 | 1.1 | 56.0 |
+| reference prefix kept, no other clip | 11.3 | 73.3 | 3.6 | 65.2 |
+| own embedding only (default) | 6.3 | 73.3 | 1.8 | 67.5 |
+
+The other-clip embedding rows cost the similarity; the cross-clip reference prefixes cost intelligibility. Keep
+`--p-reference` at 0 unless the fine-tuned model must clone from raw reference audio, and then expect a trade-off.
 
 The loss is the release loss: cross entropy over every codebook's codes plus the EOA token, codebook 0 (the semantic
 codebook) weighted 3x (`--semantic-loss-weight`). The MoE router balancing biases stay at their release values: the
@@ -76,8 +91,8 @@ use. `--inference` additionally installs the CUDA runtime for `infer.py --backen
 
 `preprocess.py` accepts a Hugging Face Parquet file (a `text` column and an embedded `audio` column, as the
 ZONOS2 trainer), a JSONL manifest or a directory of audio files with sibling `.txt` transcripts. A `speaker` column /
-field groups the clips of one voice; the reference prefix and the "other clip" embedding draws need at least two
-clips per speaker.
+field groups the clips of one voice; it only matters for the optional reference-prefix and other-clip draws, which
+need at least two clips per speaker.
 
 ```bash
 # Hugging Face Parquet
@@ -153,8 +168,8 @@ Draw mix and data options (`python finetune.py --help` lists everything):
 
 | Option | Default | Effect |
 |---|---|---|
-| `--p-embedding` / `--p-reference` | 0.45 / 0.45 | share of draws with the speaker row / the reference prefix |
-| `--embedding-other-clip` | 0.5 | the speaker row's embedding comes from another clip of the speaker |
+| `--p-embedding` / `--p-reference` | 0.9 / 0 | share of draws with the speaker row / the reference prefix of another clip |
+| `--embedding-other-clip` | 0 | share of speaker rows whose embedding comes from another clip of the speaker |
 | `--condition-dropout` | 0.2 | per condition row, replace the bucket by "unknown" |
 | `--reference-max-seconds` | 30 | longest reference prefix (the model accepts 60) |
 | `--max-seq-len` | 8192 | longest packed example in rows (about 9 minutes of audio) |
