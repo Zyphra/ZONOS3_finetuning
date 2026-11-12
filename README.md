@@ -156,7 +156,7 @@ Draw mix and data options (`python finetune.py --help` lists everything):
 | `--reference-max-seconds` | 30 | longest reference prefix (the model accepts 60) |
 | `--max-seq-len` | 8192 | longest packed example in rows (about 9 minutes of audio) |
 | `--qb-update` | full only | quantile-balancing update of the router biases |
-| `--save-every` / `--resume` | 0 / off | full fine-tunes: a resumable training state (model, optimizer, loader position) every N steps under the run directory; `--resume` continues from the latest one, for preemptible or time-limited jobs |
+| `--save-every` / `--resume` | 0 / off | full fine-tunes: a resumable training state (model, optimizer, loader position) every N steps and at the last step under the run directory; `--resume` continues from the latest one, for preemptible or time-limited jobs. A chained job (`sbatch --dependency=afterany:<id>`) with `--resume` exits at once when the run is already complete |
 | `--gdn-backend` | auto | `fla` (Triton kernels) or the slow `torch` recurrence (tests) |
 
 ## Merge a LoRA adapter

@@ -26,8 +26,15 @@ ZONOS3_BASE_MODEL=outputs/smoke_lora/merged python -m pytest tests/test_release_
 echo "== full run (compiled, quantile balancing on)"
 torchrun --standalone --nproc-per-node=1 finetune.py --config configs/full.toml \
   --data data/processed/synthetic.pt --output outputs/smoke_full/checkpoint \
-  --steps 3 --batch-size 2 --grad-accum 2 --warmup-steps 1 --num-workers 2
+  --steps 3 --batch-size 2 --grad-accum 2 --warmup-steps 1 --num-workers 2 --save-every 2
 ZONOS3_BASE_MODEL=outputs/smoke_full/checkpoint python -m pytest tests/test_release_checkpoint.py -q -k strict_load
+
+echo "== chained window: --resume on a complete run is a no-op"
+torchrun --standalone --nproc-per-node=1 finetune.py --config configs/full.toml \
+  --data data/processed/synthetic.pt --output outputs/smoke_full/checkpoint \
+  --steps 3 --batch-size 2 --grad-accum 2 --warmup-steps 1 --num-workers 2 --save-every 2 --resume \
+  | tee outputs/smoke_full/resume.log
+grep -q "run already complete at step 3" outputs/smoke_full/resume.log
 
 echo "== LoRA 'all' preset, compiled"
 torchrun --standalone --nproc-per-node=1 finetune.py --config configs/lora-all.toml \

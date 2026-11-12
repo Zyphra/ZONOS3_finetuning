@@ -708,6 +708,11 @@ def main() -> None:
         start_step, epoch, consumed = int(meta["step"]), int(meta["epoch"]), int(meta["consumed"])
         if rank == 0:
             print(f"resumed from {state_path}: step {start_step}, epoch {epoch}, {consumed} batches into it", flush=True)
+        if start_step >= args.steps:
+            if rank == 0:
+                print(f"run already complete at step {start_step} of {args.steps}; the checkpoint in {args.output} is final", flush=True)
+            dist.destroy_process_group()
+            return
     if rank == 0:
         run_output.mkdir(parents=True, exist_ok=True)
         if state_path is None:
@@ -800,10 +805,11 @@ def main() -> None:
             if should_evaluate:
                 metric["validation_loss"] = last_val_loss
             write_metric(run_output, metric)
-        if args.save_every > 0 and step_number % args.save_every == 0 and step_number < args.steps:
-            if lora_config is not None:
+        final = step_number == args.steps
+        if args.save_every > 0 and (step_number % args.save_every == 0 or final):
+            if lora_config is not None and not final:  # the final adapter is exported below
                 save_adapter_snapshot(model, args.output, step_number, rank)
-            if resumable and lora_config is None:
+            if resumable and lora_config is None:  # the final state makes a chained --resume window a no-op
                 save_train_state(model, optimizer, run_output, step_number, epoch, consumed, args, rank)
 
     save_for_public_inference(
