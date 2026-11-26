@@ -155,3 +155,25 @@ def test_lora_apply_and_merge_round_trip():
         merged_logits, _, _ = fresh(**b)
     torch.testing.assert_close(merged_logits, adapted_logits, atol=2e-3, rtol=2e-3)
     assert not torch.allclose(merged_logits, base_logits)
+
+
+def test_training_to_release_state_casts_fp32_masters_to_release_dtypes():
+    from finetune import training_to_release_state
+
+    model = Zonos3LM(ARGS).float()
+    exported = training_to_release_state(model.state_dict())
+    assert exported
+    for key, value in exported.items():
+        if key.endswith("balancing_biases"):
+            assert value.dtype == torch.float32, f"{key} should stay float32"
+        elif value.is_floating_point():
+            assert value.dtype == torch.bfloat16, f"{key} should export as bfloat16"
+
+
+def test_lr_multiplier_warmup_and_cosine_decay():
+    from finetune import lr_multiplier
+
+    assert lr_multiplier(0, total_steps=100, warmup_steps=10, min_ratio=1e-6) == 0.1
+    assert lr_multiplier(9, total_steps=100, warmup_steps=10, min_ratio=1e-6) == 1.0
+    assert lr_multiplier(10, total_steps=100, warmup_steps=10, min_ratio=1e-6) == 1.0
+    assert abs(lr_multiplier(100, total_steps=100, warmup_steps=10, min_ratio=1e-6) - 1e-6) < 1e-12

@@ -10,13 +10,14 @@ It supports two fine-tuning approaches:
 - full-model Muon, best for large distribution shifts backed by much larger datasets, such as 20+ hours in a new
   language.
 
-Training uses BF16 FSDP2, PyTorch causal SDPA for the two global-attention layers, the FLA Triton kernels for the
-gated-DeltaNet layers (the kernels the model was trained with) and a plain PyTorch expert loop for the MoE. The same
-code runs on NVIDIA CUDA and AMD ROCm (both ship Triton).
+Training uses BF16 FSDP2 (with FP32 master weights and optimizer states for full fine-tuning, matching the release
+trainer), PyTorch causal SDPA for the two global-attention layers, the FLA Triton kernels for the gated-DeltaNet layers
+(the kernels the model was trained with) and a plain PyTorch expert loop for the MoE. The same code runs on NVIDIA CUDA
+and AMD ROCm (both ship Triton).
 
-GPU memory (measured on one H100 with four 3-10 s clips per step): LoRA 2.7 GiB, full fine-tuning 5.1 GiB with the
-CPU-offloaded Muon momentum. A **24 GB GPU** runs both; longer packed batches (`--max-seq-len`, `--batch-size`) scale
-the activations.
+GPU memory (measured on one H100 with four 3-10 s clips per step): LoRA 2.7 GiB, full fine-tuning 8.5 GiB with FP32
+master weights and CPU-offloaded Muon momentum (4.0 GiB/GPU on 4 GPUs). A **24 GB GPU** runs both; longer packed
+batches (`--max-seq-len`, `--batch-size`) scale the activations.
 
 On NVIDIA Hopper GPUs (H100/H200) FLA's Triton backward of the gated delta rule is broken with Triton 3.4-3.7.0, so
 `setup.sh nvidia` also installs TileLang (the `hopper` extra); its kernels compile with `nvcc`, so `CUDA_HOME` must
@@ -157,8 +158,8 @@ torchrun --standalone --nproc-per-node=1 \
 | `configs/lora-adamw.toml` | rank-32 attention/GDN/output LoRA, AdamW + LoRA+ | single voice, the transferable default |
 | `configs/lora-muon.toml` | rank-16 attention/GDN LoRA, manifold LoRA-Muon | single voice, alternative optimizer |
 | `configs/lora-all.toml` | rank-16 LoRA on attention, GDN, FFN, experts and the head | style / accent shifts |
-| `configs/full.toml` | full-model Muon, release learning rates x 0.05 | larger datasets |
-| `configs/full-new-language.toml` | full-model Muon, longer schedule, release conditioning mix | a new language |
+| `configs/full.toml` | full-model Muon, release learning rates x 0.02 | larger datasets |
+| `configs/full-new-language.toml` | full-model Muon, longer schedule, own-clip speaker conditioning | a new language |
 
 LoRA recipes write an adapter checkpoint and periodic adapter snapshots. `metrics.jsonl` is written beside the
 checkpoint. The full recipes write a public-inference `model.pth` directly. `--data` takes several processed files
@@ -178,6 +179,7 @@ Draw mix and data options (`python finetune.py --help` lists everything):
 | `--max-seq-len` | 8192 | longest packed example in rows (about 9 minutes of audio) |
 | `--qb-update` / `--qb-ema` | off / 0.99 | per-step quantile-balancing update of the router biases (EMA-smoothed); off keeps the release routing |
 | `--save-every` / `--resume` | 0 / off | full fine-tunes: a resumable training state (model, optimizer, loader position) every N steps and at the last step under the run directory; `--resume` continues from the latest one, for preemptible or time-limited jobs. A chained job (`sbatch --dependency=afterany:<id>`) with `--resume` exits at once when the run is already complete |
+| `--master-dtype` | auto | master weight and optimizer state dtype (`auto`: `fp32` for full fine-tunes, `bf16` for LoRA) |
 | `--gdn-backend` | auto | `fla` (Triton kernels) or the slow `torch` recurrence (tests) |
 
 ## Merge a LoRA adapter

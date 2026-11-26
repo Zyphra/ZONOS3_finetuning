@@ -87,6 +87,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--qb-ema", type=float, default=0.99, help="EMA of the router-bias update when --qb-update is on")
     parser.add_argument("--gdn-backend", choices=("auto", "fla", "torch"), default="auto")
+    parser.add_argument(
+        "--master-dtype",
+        choices=("auto", "fp32", "bf16"),
+        default="auto",
+        help="Master parameter and optimizer state dtype (auto: fp32 for full fine-tunes, bf16 for LoRA).",
+    )
     parser.add_argument("--val-fraction", type=float, default=None, help="Defaults to 0.1 for LoRA and 0 for full.")
     parser.add_argument("--eval-every", type=int, default=25)
     parser.add_argument("--eval-batches", type=int, default=0, help="Maximum validation batches per pass; 0 = all.")
@@ -169,7 +175,14 @@ def release_to_training_state(state: dict[str, torch.Tensor]) -> dict[str, torch
 
 
 def training_to_release_state(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    return dict(state)
+    return {
+        key: (
+            value.to(torch.float32)
+            if key.endswith("balancing_biases")
+            else (value.to(torch.bfloat16) if value.is_floating_point() else value)
+        )
+        for key, value in state.items()
+    }
 
 
 def load_release_weights(model: Zonos3LM, checkpoint: Path, rank: int, *, allow_missing_lora: bool = False) -> None:
@@ -245,7 +258,7 @@ def _optimizer_groups(model: nn.Module, args: argparse.Namespace) -> list[dict]:
 
 
 class OffloadedMuon(torch.optim.Optimizer):
-    """Single-GPU Muon with BF16 momentum on CPU and matrix-wise GPU updates."""
+    """Single-GPU Muon with CPU-offloaded momentum and chunked matrix-wise GPU updates."""
 
     def __init__(self, groups: list[dict], momentum: float = 0.95, epsilon: float = 1e-8):
         super().__init__(groups, {"momentum": momentum, "epsilon": epsilon})
@@ -275,19 +288,30 @@ class OffloadedMuon(torch.optim.Optimizer):
                 local_parameter = parameter.to_local() if isinstance(parameter, DTensor) else parameter
                 local_gradient = parameter.grad.to_local() if isinstance(parameter.grad, DTensor) else parameter.grad
                 cpu_momentum = self.state[parameter]["momentum"]
-                parameter_matrices = local_parameter.reshape(-1, *local_parameter.shape[-2:])
-                gradient_matrices = local_gradient.reshape(-1, *local_gradient.shape[-2:])
-                momentum_matrices = cpu_momentum.reshape(-1, *cpu_momentum.shape[-2:])
                 adjusted_lr = adjust_lr_spectral_norm(lr, local_parameter.shape, flatten=False)
-                for parameter_matrix, gradient_matrix, cpu_momentum_matrix in zip(
-                    parameter_matrices, gradient_matrices, momentum_matrices
-                ):
-                    gpu_momentum = cpu_momentum_matrix.to(device=gradient_matrix.device, non_blocking=False)
-                    gpu_momentum.mul_(momentum_coefficient).add_(gradient_matrix.to(dtype=gpu_momentum.dtype))
-                    cpu_momentum_matrix.copy_(gpu_momentum, non_blocking=False)
+                if local_parameter.ndim == 2:
+                    gpu_momentum = cpu_momentum.to(device=local_gradient.device, non_blocking=False)
+                    gpu_momentum.mul_(momentum_coefficient).add_(local_gradient.to(dtype=gpu_momentum.dtype))
+                    cpu_momentum.copy_(gpu_momentum, non_blocking=False)
                     update = polar_express_triton(gpu_momentum, epsilon=float(group["epsilon"]))
-                    parameter_matrix.mul_(1.0 - lr * weight_decay)
-                    parameter_matrix.add_(update, alpha=-adjusted_lr)
+                    local_parameter.mul_(1.0 - lr * weight_decay)
+                    local_parameter.add_(update, alpha=-adjusted_lr)
+                else:
+                    parameter_matrices = local_parameter.reshape(-1, *local_parameter.shape[-2:])
+                    gradient_matrices = local_gradient.reshape(-1, *local_gradient.shape[-2:])
+                    momentum_matrices = cpu_momentum.reshape(-1, *cpu_momentum.shape[-2:])
+                    chunk = 16
+                    for start in range(0, parameter_matrices.shape[0], chunk):
+                        end = min(start + chunk, parameter_matrices.shape[0])
+                        p_chunk = parameter_matrices[start:end]
+                        g_chunk = gradient_matrices[start:end]
+                        m_cpu = momentum_matrices[start:end]
+                        gpu_momentum = m_cpu.to(device=g_chunk.device, non_blocking=False)
+                        gpu_momentum.mul_(momentum_coefficient).add_(g_chunk.to(dtype=gpu_momentum.dtype))
+                        m_cpu.copy_(gpu_momentum, non_blocking=False)
+                        update = polar_express_triton(gpu_momentum, epsilon=float(group["epsilon"]))
+                        p_chunk.mul_(1.0 - lr * weight_decay)
+                        p_chunk.add_(update, alpha=-adjusted_lr)
         return loss
 
 
@@ -396,7 +420,7 @@ def build_optimizer(model: nn.Module, args: argparse.Namespace, mesh):
 
 def lr_multiplier(step: int, total_steps: int, warmup_steps: int, min_ratio: float) -> float:
     if step < warmup_steps:
-        return float(step) / max(1, warmup_steps)
+        return float(step + 1) / max(1, warmup_steps)
     progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
     progress = min(max(progress, 0.0), 1.0)
     return min_ratio + 0.5 * (1.0 - min_ratio) * (1.0 + math.cos(math.pi * progress))
@@ -594,7 +618,12 @@ def main() -> None:
     world_size = dist.get_world_size()
     device = torch.device("cuda", local_rank)
     torch.cuda.set_device(local_rank)
-    torch.set_default_dtype(torch.bfloat16)
+    master_dtype = (
+        torch.float32
+        if (args.master_dtype == "fp32" or (args.master_dtype == "auto" and args.finetune_method == "full"))
+        else torch.bfloat16
+    )
+    torch.set_default_dtype(master_dtype)
     torch.backends.cuda.matmul.allow_tf32 = False
     random.seed(args.seed + rank)
     torch.manual_seed(args.seed + rank)

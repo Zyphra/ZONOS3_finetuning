@@ -1,11 +1,12 @@
-# Conservative full-model recipe derived from the ZONOS3-Mini fine-tuning setup (Muon, release learning rates x 0.05).
+# Conservative full-model recipe derived from the ZONOS3-Mini fine-tuning setup (Muon, release learning rates x 0.02).
 finetune_method = "full"
 steps = 300
 batch_size = 4
 grad_accum = 4
 warmup_steps = 50
-lr_scale = 0.05
-val_fraction = 0.0
+lr_scale = 0.02
+val_fraction = 0.05
+eval_every = 50
 qb_update = false
 compile = true
 export_merged = true
